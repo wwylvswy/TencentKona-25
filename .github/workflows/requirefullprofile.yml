@@ -1,0 +1,141 @@
+# Copyright (c) 2026, Tencent. All rights reserved.
+# DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+#
+# This code is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License version 2 only, as
+# published by the Free Software Foundation.
+#
+# This code is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
+# version 2 for more details (a copy is included in the LICENSE file that
+# accompanied this code).
+#
+# You should have received a copy of the GNU General Public License version
+# 2 along with this work; if not, write to the Free Software Foundation,
+# Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+# Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+# or visit www.oracle.com if you need additional information or have any
+# questions.
+
+name: RequireFullProfile tests
+
+on:
+  push:
+    paths:
+      - .github/workflows/requirefullprofile.yml
+      - src/hotspot/share/compiler/compilationPolicy.cpp
+      - src/hotspot/share/compiler/compilationPolicy.hpp
+      - src/hotspot/share/compiler/compilerOracle.hpp
+      - test/hotspot/jtreg/compiler/oracle/TestRequireFullProfileCommand.java
+      - test/hotspot/jtreg/compiler/tiered/RequireFullProfileTest.java
+      - test/hotspot/jtreg/compiler/tiered/RequireFullProfileStopAt2Test.java
+  pull_request:
+    paths:
+      - .github/workflows/requirefullprofile.yml
+      - src/hotspot/share/compiler/compilationPolicy.cpp
+      - src/hotspot/share/compiler/compilationPolicy.hpp
+      - src/hotspot/share/compiler/compilerOracle.hpp
+      - test/hotspot/jtreg/compiler/oracle/TestRequireFullProfileCommand.java
+      - test/hotspot/jtreg/compiler/tiered/RequireFullProfileTest.java
+      - test/hotspot/jtreg/compiler/tiered/RequireFullProfileStopAt2Test.java
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: requirefullprofile-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Linux x64 fastdebug
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out the JDK source
+        uses: actions/checkout@v4
+
+      - name: Build jtreg
+        uses: ./.github/actions/build-jtreg
+
+      - name: Get the Boot JDK
+        id: bootjdk
+        uses: ./.github/actions/get-bootjdk
+        with:
+          platform: linux-x64
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            autoconf \
+            build-essential \
+            libasound2-dev \
+            libcups2-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libx11-dev \
+            libxext-dev \
+            libxrandr-dev \
+            libxrender-dev \
+            libxt-dev \
+            libxtst-dev \
+            unzip \
+            zip \
+            zlib1g-dev
+
+      - name: Configure fastdebug JDK
+        run: |
+          bash configure \
+            --with-conf-name=requirefullprofile \
+            --with-boot-jdk="${{ steps.bootjdk.outputs.path }}" \
+            --with-jtreg="$GITHUB_WORKSPACE/jtreg/installed" \
+            --with-debug-level=fastdebug \
+            --with-jvm-variants=server \
+            --with-zlib=system
+
+      - name: Build JDK images
+        run: make CONF_NAME=requirefullprofile images JOBS=4
+
+      - name: Verify CompileCommand parsing
+        run: |
+          make CONF_NAME=requirefullprofile test \
+            TEST="jtreg:test/hotspot/jtreg/compiler/oracle/TestRequireFullProfileCommand.java" \
+            JTREG="JOBS=1;TIMEOUT_FACTOR=4"
+
+      - name: Verify tiered compilation transitions
+        run: |
+          make CONF_NAME=requirefullprofile test \
+            TEST="jtreg:test/hotspot/jtreg/compiler/tiered/RequireFullProfileTest.java" \
+            JTREG="JOBS=1;TIMEOUT_FACTOR=4"
+
+      - name: Verify TieredStopAtLevel=2
+        run: |
+          make CONF_NAME=requirefullprofile test \
+            TEST="jtreg:test/hotspot/jtreg/compiler/tiered/RequireFullProfileStopAt2Test.java" \
+            JTREG="JOBS=1;TIMEOUT_FACTOR=4"
+
+      - name: Verify existing level 2 recompilation behavior
+        run: |
+          make CONF_NAME=requirefullprofile test \
+            TEST="jtreg:test/hotspot/jtreg/compiler/tiered/Level2RecompilationTest.java" \
+            JTREG="JOBS=1;TIMEOUT_FACTOR=4"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: requirefullprofile-test-results
+          path: |
+            build/requirefullprofile/test-results
+            build/requirefullprofile/test-support
+          if-no-files-found: warn
+          retention-days: 7
