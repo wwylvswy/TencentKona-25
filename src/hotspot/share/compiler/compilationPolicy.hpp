@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2010, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2026, Tencent. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -262,6 +263,11 @@ class CompilationPolicy : AllStatic {
 #endif
   // Clamp the request level according to various constraints.
   inline static CompLevel limit_level(CompLevel level);
+  // Apply requirefullprofile after global compilation-level constraints.
+  static bool requires_full_profile(const methodHandle& method);
+  static CompLevel apply_require_full_profile(const methodHandle& method,
+                                              CompLevel cur_level,
+                                              CompLevel target_level);
   // Common transition function. Given a predicate determines if a method should transition to another level.
   template<typename Predicate>
   static CompLevel common(const methodHandle& method, CompLevel cur_level, JavaThread* THREAD, bool disable_feedback = false);

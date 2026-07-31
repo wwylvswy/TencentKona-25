@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2010, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2026, Tencent. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -59,6 +60,46 @@ double CompilationPolicy::_increase_threshold_at_ratio = 0;
 
 CompilationPolicy::TrainingReplayQueue CompilationPolicy::_training_replay_queue;
 
+bool CompilationPolicy::requires_full_profile(const methodHandle& method) {
+  return CompilerOracle::has_option(
+      method,
+      CompileCommandEnum::RequireFullProfile);
+}
+
+CompLevel CompilationPolicy::apply_require_full_profile(const methodHandle& method,
+                                                        CompLevel cur_level,
+                                                        CompLevel target_level) {
+  if (!CompilationModeFlag::normal() ||
+      method->is_native() ||
+      !requires_full_profile(method)) {
+    return target_level;
+  }
+
+  if (cur_level == CompLevel_full_optimization &&
+      target_level == CompLevel_full_profile) {
+    return cur_level;
+  }
+
+  if (target_level == CompLevel_limited_profile) {
+    if (cur_level >= CompLevel_full_profile) {
+      return cur_level;
+    }
+    if (highest_compile_level() >= CompLevel_full_profile) {
+      return CompLevel_full_profile;
+    }
+    // Full profiling is unavailable. Preserve the current level instead of
+    // accepting level 2 or overriding the global compilation limit.
+    return cur_level;
+  }
+
+  if (cur_level < CompLevel_full_profile &&
+      target_level == CompLevel_full_optimization) {
+    return CompLevel_full_profile;
+  }
+
+  return target_level;
+}
+
 void compilationPolicy_init() {
   CompilationPolicy::initialize();
 }
@@ -100,6 +141,8 @@ void CompilationPolicy::maybe_compile_early(const methodHandle& m, TRAPS) {
     }
     CompLevel cur_level = static_cast<CompLevel>(m->highest_comp_level());
     CompLevel next_level = trained_transition(m, cur_level, mtd, THREAD);
+    assert(next_level == apply_require_full_profile(m, cur_level, next_level),
+           "trained transition must honor requirefullprofile");
     if (next_level != cur_level && can_be_compiled(m, next_level) && !CompileBroker::compilation_is_in_queue(m)) {
       if (PrintTieredEvents) {
         print_event(FORCE_COMPILE, m(), m(), InvocationEntryBci, next_level);
@@ -806,8 +849,60 @@ CompileTask* CompilationPolicy::select_task(CompileQueue* compile_queue, JavaThr
 
   methodHandle max_method_h(THREAD, max_method);
 
-  if (max_task != nullptr && max_task->comp_level() == CompLevel_full_profile && TieredStopAtLevel > CompLevel_full_profile &&
-      max_method != nullptr && is_method_profiled(max_method_h) && !Arguments::is_compiler_only()) {
+  if (max_task != nullptr &&
+      max_task->comp_level() == CompLevel_limited_profile &&
+      max_method != nullptr) {
+    CompLevel cur_level = comp_level(max_method);
+    if (max_task->osr_bci() != InvocationEntryBci) {
+      nmethod* osr_nm = max_method->lookup_osr_nmethod_for(
+          max_task->osr_bci(), CompLevel_none, false);
+      cur_level = osr_nm == nullptr
+          ? CompLevel_none
+          : static_cast<CompLevel>(osr_nm->comp_level());
+    }
+    CompLevel adjusted_level = apply_require_full_profile(
+        max_method_h, cur_level, CompLevel_limited_profile);
+
+    if (adjusted_level == CompLevel_full_profile) {
+      max_task->set_comp_level(adjusted_level);
+
+      if (CompileBroker::compilation_is_complete(max_method_h,
+                                                 max_task->osr_bci(),
+                                                 adjusted_level)) {
+        if (PrintTieredEvents) {
+          print_event(REMOVE_FROM_QUEUE, max_method, max_method,
+                      max_task->osr_bci(), adjusted_level);
+        }
+        compile_queue->remove_and_mark_stale(max_task);
+        max_method->clear_queued_for_compilation();
+        return nullptr;
+      }
+
+      if (PrintTieredEvents) {
+        print_event(UPDATE_IN_QUEUE, max_method, max_method,
+                    max_task->osr_bci(), adjusted_level);
+      }
+    } else if (adjusted_level != CompLevel_limited_profile) {
+      if (PrintTieredEvents) {
+        print_event(REMOVE_FROM_QUEUE, max_method, max_method,
+                    max_task->osr_bci(), CompLevel_limited_profile);
+      }
+      compile_queue->remove_and_mark_stale(max_task);
+      max_method->clear_queued_for_compilation();
+      return nullptr;
+    }
+  }
+
+  if (max_task != nullptr &&
+      max_task->comp_level() == CompLevel_full_profile &&
+      TieredStopAtLevel > CompLevel_full_profile &&
+      max_method != nullptr &&
+      is_method_profiled(max_method_h) &&
+      apply_require_full_profile(max_method_h,
+                                 CompLevel_full_profile,
+                                 CompLevel_limited_profile) ==
+          CompLevel_limited_profile &&
+      !Arguments::is_compiler_only()) {
     max_task->set_comp_level(CompLevel_limited_profile);
 
     if (CompileBroker::compilation_is_complete(max_method_h, max_task->osr_bci(), CompLevel_limited_profile)) {
@@ -1225,9 +1320,9 @@ CompLevel CompilationPolicy::trained_transition_from_full_profile(const methodHa
 CompLevel CompilationPolicy::trained_transition(const methodHandle& method, CompLevel cur_level, MethodTrainingData* mtd, JavaThread* THREAD) {
   precond(MethodTrainingData::have_data());
 
-  // If there is no training data recorded for this method, bail out.
+  // Without training data, only apply the method-level state constraint.
   if (mtd == nullptr) {
-    return cur_level;
+    return apply_require_full_profile(method, cur_level, cur_level);
   }
 
   CompLevel next_level = cur_level;
@@ -1251,7 +1346,8 @@ CompLevel CompilationPolicy::trained_transition(const methodHandle& method, Comp
   if (CompilationModeFlag::high_only() && next_level < CompLevel_full_optimization) {
     return CompLevel_none;
   }
-  return (cur_level != next_level) ? limit_level(next_level) : cur_level;
+  CompLevel target_level = (cur_level != next_level) ? limit_level(next_level) : next_level;
+  return apply_require_full_profile(method, cur_level, target_level);
 }
 
 /*
@@ -1320,7 +1416,9 @@ CompLevel CompilationPolicy::common(const methodHandle& method, CompLevel cur_le
   } else {
     next_level = standard_transition<Predicate>(method, cur_level, false /*delay_profiling*/, disable_feedback);
   }
-  return (next_level != cur_level) ? limit_level(next_level) : next_level;
+
+  CompLevel target_level = (next_level != cur_level) ? limit_level(next_level) : next_level;
+  return apply_require_full_profile(method, cur_level, target_level);
 }
 
 
@@ -1553,4 +1651,3 @@ void CompilationPolicy::method_back_branch_event(const methodHandle& mh, const m
     }
   }
 }
-

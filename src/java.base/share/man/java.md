@@ -1,5 +1,6 @@
 ---
 # Copyright (c) 1994, 2025, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2026, Tencent. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -1785,6 +1786,15 @@ performed by the Java HotSpot VM.
 
         You can suppress this by specifying the `-XX:CompileCommand=quiet`
         option before other `-XX:CompileCommand` options.
+
+    `requirefullprofile`
+    :   In normal tiered compilation, routes tier 2 compilation and direct
+        transitions to tier 4 through tier 3 so that the specified non-native
+        method collects a full profile. Existing tier 1 decisions are
+        unchanged. If tier 3 is unavailable, a tier 2 compilation is not
+        submitted. This command doesn't override the globally available
+        compilation levels, such as the level selected by
+        `-XX:TieredStopAtLevel`.
 
 `-XX:CompileCommandFile=`*filename*
 :   Sets the file from which JIT compiler commands are read. By default, the
